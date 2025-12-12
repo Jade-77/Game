@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Simple Infinite Runner</title>
+<style>
+  :root{
+    --bg:#87CEEB; /* sky */
+    --ground:#7C4A1E;
+    --player:#FFDD57;
+    --ob:#333;
+    --hud:#fff;
+  }
+  html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial}
+  #game-wrap{display:flex;align-items:center;justify-content:center;height:100%;background:linear-gradient(#cdeaff, var(--bg));}
+  canvas{background:transparent;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.15)}
+  .ui {
+    position: absolute; top:18px; left:18px; color:var(--hud);
+    text-shadow:0 2px 6px rgba(0,0,0,0.45);
+    font-weight:700;
+  }
+  .ui button {
+    margin-left:12px; background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.22);
+    color:inherit; padding:6px 10px; border-radius:8px; cursor:pointer;
+  }
+  .bottom-hint {position:absolute; bottom:18px; left:18px; color:#333; font-weight:600; text-shadow:none}
+  .center-msg {position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:#222; text-align:center}
+  .center-msg button {display:block; margin-top:10px; padding:8px 14px; border-radius:10px; border:0; cursor:pointer; font-weight:700}
+  @media (max-width:700px){ canvas{width:95vw!important;height:55vh!important} }
+</style>
+</head>
+<body>
+  <div id="game-wrap">
+    <div style="position:relative;">
+      <canvas id="c" width="960" height="400"></canvas>
+      <div class="ui" id="hud">Score: <span id="score">0</span>
+        <button id="muteBtn">Mute</button>
+      </div>
+      <div class="center-msg" id="centerMsg" style="display:none">
+        <div id="finalText" style="font-size:20px"></div>
+        <button id="restartBtn">Restart</button>
+      </div>
+      <div class="bottom-hint">Controls: Space / ↑ / Tap to jump</div>
+    </div>
+  </div>
+
+<script>
+/* --- Simple Infinite Runner (vanilla JS + canvas) --- */
+/* Features:
+   - Player runs automatically on a scrolling ground.
+   - Press Space / ArrowUp / Tap to jump.
+   - Obstacles spawn with increasing difficulty.
+   - Score increases over time.
+   - Restart on crash.
+*/
+
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: true });
+  const W = canvas.width, H = canvas.height;
+
+  // UI
+  const scoreEl = document.getElementById('score');
+  const centerMsg = document.getElementById('centerMsg');
+  const finalText = document.getElementById('finalText');
+  const restartBtn = document.getElementById('restartBtn');
+  const muteBtn = document.getElementById('muteBtn');
+
+  // Game state
+  let last = 0, dt = 0;
+  let running = true, gameOver = false;
+  let speed = 300; // pixels per second for world scroll
+  let distance = 0;
+  let spawnTimer = 0;
+  let spawnInterval = 1.2; // seconds
+  let obstacles = [];
+  let particles = [];
+  let gravity = 2200; // px/s^2
+  let score = 0;
+  let highScore = 0;
+  let muted = false;
+
+  // Player
+  const player = {
+    x: 140,
+    y: H - 80,
+    w: 40,
+    h: 44,
+    vy: 0,
+    grounded: false,
+    color: getComputedStyle(document.documentElement).getPropertyValue('--player').trim() || '#FFDD57',
+    jumpStrength: 760,
+    canDoubleJump: false
+  };
+
+  // Ground
+  const ground = { y: H - 40, color: getComputedStyle(document.documentElement).getPropertyValue('--ground').trim() || '#7C4A1E' };
+
+  // sounds (tiny beep using WebAudio)
+  const audioCtx = window.AudioContext ? new AudioContext() : null;
+  function beep(freq = 440, time = 0.06, vol=0.08){
+    if(muted || !audioCtx) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.type = 'sine'; o.frequency.value = freq;
+    g.gain.value = vol;
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + time);
+    o.stop(audioCtx.currentTime + time + 0.02);
+  }
+
+  // Helpers
+  function rand(min,max){ return Math.random()*(max-min)+min; }
+  function rectsOverlap(a,b){
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  // Obstacles spawn variations
+  function spawnObstacle(){
+    // obstacle can be small or tall; sometimes double obstacles
+    const h = Math.round(rand(24, 80));
+    const w = Math.round(rand(18, 48));
+    const ob = {
+      x: W + 20,
+      y: ground.y - h,
+      w, h,
+      color: getComputedStyle(document.documentElement).getPropertyValue('--ob').trim() || '#333',
+      passed: false
+    };
+    obstacles.push(ob);
+    // occasionally add a second nearby obstacle
+    if(Math.random() < 0.12){
+      const gap = rand(40, 120);
+      obstacles.push({
+        x: W + 20 + w + gap,
+        y: ground.y - Math.round(rand(18, 74)),
+        w: Math.round(rand(16, 40)),
+        h: Math.round(rand(20, 68)),
+        color: getComputedStyle(document.documentElement).getPropertyValue('--ob').trim() || '#333',
+        passed: false
+      });
+    }
+  }
+
+  // Reset game
+  function reset(){
+    obstacles = [];
+    particles = [];
+    player.y = ground.y - player.h;
+    player.vy = 0;
+    player.grounded = true;
+    score = 0; distance = 0;
+    spawnTimer = 0; spawnInterval = 1.2; speed = 300; gameOver = false;
+    centerMsg.style.display = 'none';
+    last = performance.now();
+    if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    loop();
+  }
+
+  // Handle jump
+  function jump(){
+    if(gameOver) return;
+    if(player.grounded){
+      player.vy = -player.jumpStrength;
+      player.grounded = false;
+      player.canDoubleJump = true;
+      beep(880,0.06,0.08);
+    } else if(player.canDoubleJump){
+      // small double jump
+      player.vy = -player.jumpStrength * 0.78;
+      player.canDoubleJump = false;
+      beep(1100,0.05,0.06);
+    }
+  }
+
+  // Input
+  window.addEventListener('keydown', e => {
+    if(e.code === 'Space' || e.code === 'ArrowUp'){ e.preventDefault(); jump(); }
+    if(e.key.toLowerCase() === 'r' && gameOver){ reset(); }
+  });
+  canvas.addEventListener('touchstart', e=>{ e.preventDefault(); jump(); }, {passive:false});
+  canvas.addEventListener('mousedown', e=>{ jump(); });
+
+  restartBtn.addEventListener('click', reset);
+  muteBtn.addEventListener('click', ()=>{ muted = !muted; muteBtn.textContent = muted ? 'Unmute' : 'Mute'; });
+
+  // Main loop
+  function loop(ts){
+    if(!last) last = ts || performance.now();
+    dt = (ts - last)/1000;
+    if(dt > 0.06) dt = 0.06; // clamp for tab switches
+    update(dt);
+    render();
+    last = ts;
+    if(!gameOver) requestAnimationFrame(loop);
+  }
+
+  function update(dt){
+    // increase difficulty slowly
+    speed += dt * 6; // accelerate world speed slightly
+    distance += speed * dt;
+    score = Math.floor(distance/10);
+    scoreEl.textContent = score;
+
+    spawnTimer += dt;
+    // spawn more often as speed increases
+    spawnInterval = Math.max(0.55, 1.2 - (speed-300)/1600);
+    if(spawnTimer >= spawnInterval){
+      spawnTimer = 0;
+      spawnObstacle();
+    }
+
+    // update player physics
+    player.vy += gravity * dt;
+    player.y += player.vy * dt;
+
+    // ground collision
+    if(player.y + player.h > ground.y){
+      player.y = ground.y - player.h;
+      player.vy = 0;
+      player.grounded = true;
+      player.canDoubleJump = false;
+    } else {
+      player.grounded = false;
+    }
+
+    // update obstacles
+    for(let i=obstacles.length-1;i>=0;i--){
+      const ob = obstacles[i];
+      ob.x -= speed * dt;
+      // remove off-screen
+      if(ob.x + ob.w < -40) obstacles.splice(i,1);
+      // check collision with player
+      const pbox = {x: player.x, y: player.y, w: player.w, h: player.h};
+      if(rectsOverlap(pbox, ob)){
+        crash();
+      }
+      // add score when passed
+      if(!ob.passed && ob.x + ob.w < player.x){
+        ob.passed = true;
+        // small reward sound
+        beep(660,0.03,0.03);
+      }
+    }
+
+    // particles (for visual)
+    for(let i=particles.length-1;i>=0;i--){
+      const pt = particles[i];
+      pt.x += pt.vx * dt;
+      pt.y += pt.vy * dt;
+      pt.life -= dt;
+      if(pt.life <= 0) particles.splice(i,1);
+    }
+  }
+
+  function crash(){
+    if(gameOver) return;
+    gameOver = true;
+    finalText.textContent = `Game Over — Score: ${score}`;
+    centerMsg.style.display = 'block';
+    beep(120,0.25,0.1);
+    // show a few particles
+    for(let i=0;i<18;i++){
+      particles.push({
+        x: player.x + player.w/2,
+        y: player.y + player.h/2,
+        vx: rand(-200,200),
+        vy: rand(-400, -40),
+        life: rand(0.4,1.1)
+      });
+    }
+    // stop the main loop updates by not requesting another frame (loop does this)
+    // but render once more to show final frame
+    render();
+  }
+
+  // draw rounded rect helper
+  function roundRect(x, y, w, h, r){
+    const radius = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+radius, y);
+    ctx.arcTo(x+w, y, x+w, y+h, radius);
+    ctx.arcTo(x+w, y+h, x, y+h, radius);
+    ctx.arcTo(x, y+h, x, y, radius);
+    ctx.arcTo(x, y, x+w, y, radius);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function render(){
+    // clear
+    ctx.clearRect(0,0,W,H);
+
+    // sky gradient
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#cdeaff');
+    g.addColorStop(0.6,'#87CEEB');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+
+    // ground (simple repeated lines for parallax feel)
+    ctx.fillStyle = ground.color;
+    roundRect(0, ground.y, W, H-ground.y, 0);
+
+    // draw small ground stripes moving (parallax)
+    ctx.save();
+    const stripeCount = 24;
+    for(let i=0;i<stripeCount;i++){
+      const sx = ((i*160) - (distance*0.35 % 160));
+      ctx.globalAlpha = 0.08;
+      ctx.fillStyle = '#2d1a0e';
+      ctx.fillRect(sx, ground.y + 6, 100, 6);
+    }
+    ctx.restore();
+
+    // draw player (simple rectangle with small eye)
+    ctx.fillStyle = player.color;
+    roundRect(player.x, player.y, player.w, player.h, 6);
+    // eye
+    ctx.fillStyle = '#222';
+    ctx.fillRect(player.x + player.w - 14, player.y + 12, 6, 6);
+
+    // obstacles
+    obstacles.forEach(ob=>{
+      ctx.fillStyle = ob.color;
+      roundRect(ob.x, ob.y, ob.w, ob.h, 6);
+    });
+
+    // particles
+    particles.forEach(pt=>{
+      ctx.globalAlpha = Math.max(0, pt.life);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(pt.x, pt.y, 4, 4);
+      ctx.globalAlpha = 1;
+    });
+
+    // HUD small speed and highscore
+    ctx.fillStyle = '#000000AA';
+    ctx.font = '12px system-ui';
+    ctx.fillText(`Speed: ${Math.round(speed)} px/s`, W - 140, 22);
+    ctx.fillText(`High: ${highScore}`, W - 140, 38);
+
+    // update highscore
+    if(score > highScore) highScore = score;
+  }
+
+  // Start the game loop
+  last = performance.now();
+  loop(last);
+
+  // expose reset for external use (debug)
+  window.__simpleRunner = { reset };
+
+  // Save high score to localStorage (periodically)
+  setInterval(()=> {
+    try{ localStorage.setItem('simpleRunnerHigh', String(highScore)); }catch(e){}
+  }, 2000);
+  // load
+  try{
+    const hs = parseInt(localStorage.getItem('simpleRunnerHigh')||'0',10);
+    if(!isNaN(hs)) highScore = hs;
+  }catch(e){}
+})();
+</script>
+</body>
+</html>
